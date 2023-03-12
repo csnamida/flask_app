@@ -10,6 +10,8 @@ app.config["SECRET_KEY"] = "d73d59f2-a943-44a4-b1fc-fe8b3e909f36"
 app.config["JWT_SECRET_KEY"] = "fa90c298-52e1-462b-953a-8a34dcd8c430"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///project.db"
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = ACCESS_EXPIRES
+app.config["JWT_TOKEN_LOCATION"] = ["cookies"]
+app.config["JWT_COOKIE_SECURE"] = False
 
 jwt = JWTManager(app)
 jwt_redis_block_list = redis.StrictRedis(

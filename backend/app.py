@@ -1,10 +1,11 @@
 from .config import app, ACCESS_EXPIRES, jwt_redis_block_list, jwt
-from flask import json
+from flask import json, jsonify
 from flask_restful import Resource, Api, reqparse
 from .models import UserModel, TaskModel, db
 from sqlalchemy import select
 from werkzeug.security import generate_password_hash
-from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required, get_jwt, current_user
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt, current_user, set_access_cookies, unset_jwt_cookies
+from datetime import datetime, timezone, timedelta
 
 api = Api(app)
 
@@ -35,18 +36,9 @@ class Register(Resource):
             db.session.add(new_user)
             db.session.commit()
 
-            return app.response_class(
-                status=200,
-                response=json.dumps(
-                    {"msg": "Account successfully registered."}),
-                mimetype='application/json'
-            )
+            return {"msg": "Credentials successfully registered."}, 201
 
-        return app.response_class(
-            status=400,
-            response=json.dumps({"msg": "User already exists."}),
-            mimetype='application/json'
-        )
+        return {"msg": "User already exists."}, 400
 
 
 class User(Resource):
@@ -58,11 +50,7 @@ class User(Resource):
 
         db.session.commit()
 
-        return app.response_class(
-            status=200,
-            response=json.dumps({"msg": "Password was successfully updated."}),
-            mimetype='application/json'
-        )
+        return {"msg": "Password was successfully updated."}, 200
 
 
 class Login(Resource):
@@ -74,21 +62,12 @@ class Login(Resource):
             access_token = create_access_token(identity=user[0])
             user[0].is_authenticated = True
             db.session.commit()
+            response = jsonify({"msg": "Login successfully."})
+            set_access_cookies(response, access_token)
 
-            return app.response_class(
-                status=200,
-                response=json.dumps({
-                    "msg": "Login successfully",
-                    "access_token": access_token
-                }),
-                mimetype='application/json'
-            )
+            return response
 
-        return app.response_class(
-            status=401,
-            response=json.dumps({"msg": "Invalid username or password."}),
-            mimetype='application/json'
-        )
+        return {"msg": "Invalid username or password."}, 401
 
 
 class Logout(Resource):
@@ -98,12 +77,9 @@ class Logout(Resource):
         db.session.commit()
         jti = get_jwt()["jti"]
         jwt_redis_block_list.set(jti, "", ex=ACCESS_EXPIRES)
-
-        return app.response_class(
-            status=200,
-            response=json.dumps({"msg": "You have been logout."}),
-            mimetype='application/json'
-        )
+        response = jsonify({"msg": "You have been logout."})
+        unset_jwt_cookies(response)
+        return response
 
 
 class Task(Resource):
@@ -114,22 +90,14 @@ class Task(Resource):
         task = Utils.find_task_using_title(args['title'])
 
         if task is not None:
-            return app.response_class(
-                status=400,
-                response=json.dumps({"msg": "Task already exists."}),
-                mimetype='application/json'
-            )
+            return {"msg": "Task already exists."}, 400
 
         new_task = TaskModel(
             title=args['title'], user_id=current_user.id)
         db.session.add(new_task)
         db.session.commit()
 
-        return app.response_class(
-            status=200,
-            response=json.dumps({"msg": "Task was successfully added."}),
-            mimetype='application/json'
-        )
+        return {"msg": "Task was successfully added."}, 200
 
     @jwt_required()
     def get(self):
@@ -137,22 +105,11 @@ class Task(Resource):
             select(TaskModel).where(TaskModel.user_id == current_user.id)).all()
 
         if tasks is None:
-            return app.response_class(
-                status=404,
-                response=json.dumps(
-                    {"msg": "There are no current available to do task."}),
-                mimetype='application/json'
-            )
+            return {"msg": "There are no current available todo task."}, 404
 
-        todo_tasks = json.dumps([
-            {task[0].id: task[0].title} for task in tasks
-        ])
+        todo_tasks = [{task[0].id: task[0].title} for task in tasks]
 
-        return app.response_class(
-            status=200,
-            response=todo_tasks,
-            mimetype='application/json'
-        )
+        return todo_tasks, 200
 
 
 class UserTask(Resource):
@@ -161,48 +118,29 @@ class UserTask(Resource):
         task = Utils.find_task_using_id(id)
 
         if task is None:
-            return app.response_class(
-                status=404,
-                response=json.dumps({"msg": "Task not found."}),
-                mimetype='application/json'
-            )
+            return {"msg": "Task not found."}, 404
 
         args = task_parser.parse_args()
 
         if task[0].title.lower() == args['title'].lower():
-            return app.response_class(
-                status=400,
-                response=json.dumps({"msg": "Use different title."}),
-                mimetype='application/json'
-            )
+            return {"msg": "Use different title."}, 400
 
         task[0].title = args['title']
         db.session.commit()
 
-        return app.response_class(
-            status=200,
-            response=json.dumps({"msg": "Task successfully updated."}),
-            mimetype='application/json'
-        )
+        return {"msg": "Task successfully updated."}, 200
 
     @jwt_required()
     def delete(self, id):
         task = Utils.find_task_using_id(id)
 
         if task is None:
-            return app.response_class(
-                status=404,
-                response=json.dumps({"msg": "Task not found."}),
-                mimetype='application/json'
-            )
+            return {"msg": "Task not found."}, 404
 
         db.session.delete(task[0])
         db.session.commit()
 
-        return app.response_class(
-            status=204,
-            mimetype='application/json'
-        )
+        return 204
 
 
 class Utils:
@@ -230,9 +168,23 @@ def user_lookup_callback(_jwt_header, jwt_data):
     return user[0] if (user := db.session.execute(select(UserModel).where(UserModel.id == identity)).first()) else None
 
 
+@app.after_request
+def refresh_expiring_jwts(response):
+    try:
+        exp_timestamp = get_jwt()["exp"]
+        now = datetime.now(timezone.utc)
+        target_timestamp = datetime.timestamp(now + timedelta(minutes=30))
+        if target_timestamp > exp_timestamp:
+            access_token = create_access_token(identity=current_user)
+            set_access_cookies(response, access_token)
+        return response
+    except (RuntimeError, KeyError):
+        return response
+
+
 api.add_resource(Register, '/register')
 api.add_resource(User, '/<username>')
 api.add_resource(Login, '/login')
 api.add_resource(Logout, '/logout')
-api.add_resource(Task, '/task')
+api.add_resource(Task, '/tasks')
 api.add_resource(UserTask, '/task/<id>')
